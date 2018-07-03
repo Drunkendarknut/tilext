@@ -1,0 +1,10 @@
+{
+	"folders":
+	[
+		{
+			"path": ".",
+            "folder_include_patterns": ["src"],
+            "file_exclude_patterns": ["Cargo.lock"]
+		}
+	]
+}

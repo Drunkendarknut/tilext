@@ -5,9 +5,10 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::ffi::OsString;
 
-struct Config
+struct Config<'a>
 {
     tile_size: usize,
+    output_suffix: &'a str,
     input_paths: Vec<PathBuf>
 }
 
@@ -34,10 +35,11 @@ fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
     // Make backup
     //
 
-    let mut file_name: OsString = input_path.file_name().ok_or("")?.to_os_string();
     let mut backup_path = input_path.clone();
-    file_name.push(".backup");
-    backup_path.set_file_name(file_name);
+    let mut backup_name = backup_path.file_stem().ok_or("Invalid path")?.to_os_string();
+    backup_name.push("_backup");
+    backup_name.push(".png");
+    backup_path.set_file_name(backup_name);
 
     lodepng::encode32_file(&backup_path, &image.buffer, image.width, image.height)?;
 
@@ -48,6 +50,7 @@ fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
     //
 
     let tile_size_with_gutters = config.tile_size + 2;
+    let tile_max_x = tile_size_with_gutters - 1;
     let columns = image.width / tile_size_with_gutters;
     let rows = image.height / tile_size_with_gutters;
 
@@ -62,8 +65,6 @@ fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
                 for tile_pixel_x in 0..tile_size_with_gutters {
 
                     let pixel_x = tile_pixel_x + tile_column_i * tile_size_with_gutters;
-
-                    let tile_max_x = tile_size_with_gutters - 1;
 
                     let from_i = if tile_pixel_y == 0 {
 
@@ -117,9 +118,15 @@ fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
     // Write to file
     //
 
-    lodepng::encode32_file(input_path, &image.buffer, image.width, image.height)?;
+    let mut output_path = input_path.clone();
+    let mut output_name = output_path.file_stem().ok_or("Invalid path")?.to_os_string();
+    output_name.push(config.output_suffix);
+    output_name.push(".png");
+    output_path.set_file_name(output_name);
 
-    println!("  Wrote {} pixels to {:?}", image.buffer.len(), OsString::from(input_path));
+    lodepng::encode32_file(&output_path, &image.buffer, image.width, image.height)?;
+
+    println!("  Wrote {} pixels to {:?}", image.buffer.len(), OsString::from(output_path));
 
     return Ok(());
 }
@@ -134,10 +141,10 @@ fn main()
 
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 { panic!("not enough arguments"); }
+    if args.len() < 4 { panic!("not enough arguments"); }
 
     let mut input_paths = Vec::<PathBuf>::new();
-    for it in args[2..].iter().map(|s| PathBuf::from(s))
+    for it in args[3..].iter().map(|s| PathBuf::from(s))
     {
         input_paths.push(it);
     }
@@ -145,6 +152,7 @@ fn main()
     let config = Config {
         tile_size: args[1].parse()
             .expect("The first argument should be the width/height of one tile (exluding gutters). Ex: tilext 16 image.png"),
+        output_suffix: &args[2],
         input_paths
     };
 

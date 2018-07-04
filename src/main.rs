@@ -1,141 +1,113 @@
 extern crate lodepng;
 
 use std::env;
+use std::error::Error;
 use std::path::PathBuf;
 use std::ffi::OsString;
 
-struct Config<'a>
+struct Config
 {
-    input_path: &'a PathBuf,
-    tile_size: usize
+    tile_size: usize,
+    input_paths: Vec<PathBuf>
 }
 
-fn main()
+fn get_pixel_index(pixel_x: usize, pixel_y: usize, image_width: usize) -> usize
 {
-    //
-    // Get arguments
-    //
+    pixel_y * image_width + pixel_x
+}
 
-    let args: Vec<String> = env::args().collect();
+fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
+{
+    let input_path = &config.input_paths[path_i];
 
-    if args.len() < 3 { panic!("not enough arguments"); }
-
-    // let file_name = args[1].clone();
-    let config = Config {
-        input_path: &PathBuf::from(&args[1]),
-        tile_size: args[2].parse()
-            .expect("The second argument should be tile width/height (exluding gutters). Ex: tilext image.png 16")
-    };
+    println!("\nFile: {:?}:", input_path);
 
     //
     // Read file
     //
 
-    let mut image = lodepng::decode32_file(config.input_path).expect("couldn't open file");
-    let bytes_per_pixel = std::mem::size_of::<lodepng::RGBA>(); // decode32_file always returns Bitmap<RGBA> data
+    let mut image = lodepng::decode32_file(input_path)?;
 
-    println!("\nRead {:?} bytes from {:?}\n", image.buffer.len() * bytes_per_pixel, OsString::from(config.input_path));
+    println!("  Read {} pixels from file", image.buffer.len());
 
     //
     // Make backup
     //
 
-    let mut backup_path = config.input_path.clone();
-    let mut file_name = backup_path.file_name().unwrap().to_os_string();
+    let mut file_name: OsString = input_path.file_name().ok_or("")?.to_os_string();
+    let mut backup_path = input_path.clone();
     file_name.push(".backup");
     backup_path.set_file_name(file_name);
 
-    lodepng::encode32_file(&backup_path, &image.buffer, image.width, image.height).expect("couldn't write to image");
+    lodepng::encode32_file(&backup_path, &image.buffer, image.width, image.height)?;
 
-    println!("Wrote {:?} bytes to {:?}\n", image.buffer.len() * bytes_per_pixel, OsString::from(backup_path));
+    println!("  Wrote {} pixels to {:?}", image.buffer.len(), OsString::from(backup_path));
 
     //
     // Extrude tiles
     //
+
     let tile_size_with_gutters = config.tile_size + 2;
     let columns = image.width / tile_size_with_gutters;
     let rows = image.height / tile_size_with_gutters;
 
-    // for each row
+    println!("  Extruding {} ({}*{}) tiles into 1-pixel gutters", columns*rows, columns, rows);
+
     for tile_row_i in 0..rows {
-        // for each column
         for tile_column_i in 0..columns {
-
-            // get tile origin
-
-            // for each pixel row in tile
             for tile_pixel_y in 0..tile_size_with_gutters {
 
-                let pixel_y = tile_pixel_y + tile_column_i * tile_size_with_gutters;
+                let pixel_y = tile_pixel_y + tile_row_i * tile_size_with_gutters;
 
-                // for each pixel in row
                 for tile_pixel_x in 0..tile_size_with_gutters {
 
-                    let pixel_x = tile_pixel_x + tile_row_i * tile_size_with_gutters;
+                    let pixel_x = tile_pixel_x + tile_column_i * tile_size_with_gutters;
 
-                    let pixel_i = pixel_y * image.width + pixel_x;
+                    let tile_max_x = tile_size_with_gutters - 1;
 
-                    let from_i: Option<usize> =
-                        // if top gutter
-                        if tile_pixel_y == 0 {
-                            Some(
-                                // if left gutter
-                                if tile_pixel_x == 0 {
-                                    // copy from (1,1)
-                                    (pixel_y + 1) * image.width + (pixel_x + 1)
-                                }
-                                // if right gutter
-                                else if tile_pixel_x == tile_size_with_gutters - 1 {
-                                    // copy from tile (-1,1)
-                                    (pixel_y + 1) * image.width + (pixel_x - 1)
-                                }
-                                else {
-                                    // copy from pixel below
-                                    (pixel_y + 1) * image.width + pixel_x
-                                } as usize
-                            )
-                        }
-                        // if bottom gutter
-                        else if tile_pixel_y == tile_size_with_gutters - 1
-                        {
-                            Some(
-                                // if left gutter
-                                if tile_pixel_x == 0 {
-                                    // copy from (1,-1)
-                                    (pixel_y - 1) * image.width + (pixel_x + 1)
-                                }
-                                // if right gutter
-                                else if tile_pixel_x == tile_size_with_gutters - 1 {
-                                    // copy from (-1,-1)
-                                    (pixel_y - 1) * image.width + (pixel_x - 1)
-                                }
-                                else {
-                                    // copy from pixel above
-                                    (pixel_y - 1) * image.width + pixel_x
-                                } as usize
-                            )
-                        }
-                        else
-                        {
-                            // if left gutter
+                    let from_i = if tile_pixel_y == 0 {
+
+                        Some(
                             if tile_pixel_x == 0 {
-                                // copy from right
-                                Some((pixel_y * image.width + (pixel_x + 1)) as usize)
+                                get_pixel_index(pixel_x+1, pixel_y+1, image.width)
                             }
-                            // if right gutter
-                            else if tile_pixel_x == tile_size_with_gutters -1 {
-                                // copy from left
-                                Some((pixel_y * image.width + (pixel_x - 1)) as usize)
+                            else if tile_pixel_x == tile_max_x {
+                                get_pixel_index(pixel_x-1, pixel_y+1, image.width)
                             }
-                            else { None }
-                        };
+                            else {
+                                get_pixel_index(pixel_x, pixel_y+1, image.width)
+                            }
+                        )
+                    } else if tile_pixel_y == tile_max_x {
+
+                        Some(
+                            if tile_pixel_x == 0 {
+                                get_pixel_index(pixel_x+1, pixel_y-1, image.width)
+                            }
+                            else if tile_pixel_x == tile_max_x {
+                                get_pixel_index(pixel_x-1, pixel_y-1, image.width)
+                            }
+                            else {
+                                get_pixel_index(pixel_x, pixel_y-1, image.width)
+                            }
+                        )
+                    } else {
+
+                        if tile_pixel_x == 0 {
+                            Some(get_pixel_index(pixel_x+1, pixel_y, image.width))
+                        }
+                        else if tile_pixel_x == tile_size_with_gutters -1 {
+                            Some(get_pixel_index(pixel_x-1, pixel_y, image.width))
+                        }
+                        else { None }
+                    };
 
                     if let Some(from_i) = from_i
                     {
+                        let to_i = get_pixel_index(pixel_x, pixel_y, image.width);
                         let from = image.buffer[from_i].clone();
-                        image.buffer[pixel_i] = from;
+                        image.buffer[to_i] = from;
                     }
-
                 }
             }
         }
@@ -145,7 +117,42 @@ fn main()
     // Write to file
     //
 
-    lodepng::encode32_file(config.input_path, &image.buffer, image.width, image.height).expect("couldn't write to image");
+    lodepng::encode32_file(input_path, &image.buffer, image.width, image.height)?;
 
-    println!("Wrote {:?} bytes to {:?}\n", image.buffer.len() * bytes_per_pixel, OsString::from(config.input_path));
+    println!("  Wrote {} pixels to {:?}", image.buffer.len(), OsString::from(input_path));
+
+    return Ok(());
+}
+
+fn main()
+{
+    println!();
+
+    //
+    // Get arguments
+    //
+
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 3 { panic!("not enough arguments"); }
+
+    let mut input_paths = Vec::<PathBuf>::new();
+    for it in args[2..].iter().map(|s| PathBuf::from(s))
+    {
+        input_paths.push(it);
+    }
+
+    let config = Config {
+        tile_size: args[1].parse()
+            .expect("The first argument should be the width/height of one tile (exluding gutters). Ex: tilext 16 image.png"),
+        input_paths
+    };
+
+    for i in 0..config.input_paths.len()
+    {
+        if let Err(e) = process_image(&config, i)
+        {
+            eprintln!("Error: {}", e);
+        }
+    }
 }

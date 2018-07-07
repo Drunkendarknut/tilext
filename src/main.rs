@@ -5,6 +5,8 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::ffi::OsString;
 
+use lodepng::RGBA;
+
 struct Config<'a>
 {
     tile_size: usize,
@@ -16,9 +18,9 @@ struct Config<'a>
 #[derive(Debug, PartialEq)]
 enum ArgsKey
 {
+    Default,
     TileSize,
-    OutputSuffix,
-    FilePath
+    OutputSuffix
 }
 
 fn parse_args<'a>(args: &'a Vec<String>) -> Result<Config<'a>, Box<Error>>
@@ -29,7 +31,7 @@ fn parse_args<'a>(args: &'a Vec<String>) -> Result<Config<'a>, Box<Error>>
     let mut make_backup = false;
 
     use ArgsKey::*;
-    let mut current_key = FilePath;
+    let mut current_key = Default;
     for arg in args.as_slice()
     {
         match current_key
@@ -39,16 +41,16 @@ fn parse_args<'a>(args: &'a Vec<String>) -> Result<Config<'a>, Box<Error>>
                 tile_size = Some(arg.parse().map_err(
                     |e| format!("{} (after --tile--size)", e)
                 )?);
-                current_key = FilePath;
+                current_key = Default;
             },
 
             OutputSuffix =>
             {
                 output_suffix = &arg;
-                current_key = FilePath;
+                current_key = Default;
             },
 
-            FilePath =>
+            Default =>
             {
                 if arg.starts_with("--")
                 {
@@ -58,7 +60,7 @@ fn parse_args<'a>(args: &'a Vec<String>) -> Result<Config<'a>, Box<Error>>
                         "output-suffix" => OutputSuffix,
                         s => {
                             println!("Warning: Argument key {} is unknown (ignoring)", s);
-                            FilePath
+                            Default
                         }
                     };
                 }
@@ -70,7 +72,7 @@ fn parse_args<'a>(args: &'a Vec<String>) -> Result<Config<'a>, Box<Error>>
         }
     }
 
-    if current_key != FilePath
+    if current_key != Default
     {
         return Err(format!("Expected another argument (type {:?})", current_key).into());
     }
@@ -86,16 +88,14 @@ fn parse_args<'a>(args: &'a Vec<String>) -> Result<Config<'a>, Box<Error>>
         println!("Warning: No output suffix specified. Input file will be overwritten, and a backup (with suffix _backup) will be made. (use --output-suffix if you meant to specify a suffix)");
     }
 
-    return Ok(Config
+    let c = Config
     {
         tile_size: tile_size.ok_or("No tile size specified (use --tile-size)")?,
-
         output_suffix,
-
         make_backup,
-
         input_paths
-    });
+    };
+    return Ok(c);
 }
 
 fn get_pixel_index(pixel_x: usize, pixel_y: usize, image_width: usize) -> usize
@@ -135,64 +135,151 @@ fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
         println!("  Wrote {} pixels to {:?}", image.buffer.len(), OsString::from(backup_path));
     }
 
-    // TODO: Resize image, adding gutters
+    //
+    // Resize image
+    //
+
+    let columns = image.width / config.tile_size;
+    let rows = image.height / config.tile_size;
+
+    let new_width = image.width + columns * 2;
+    let new_height = image.height + rows * 2;
+
+    println!("new_width: {:?}, new_height: {:?}", new_width, new_height);
+
+    let to_insert = new_width * rows * 2
+                    + rows * config.tile_size * columns * 2;
+    image.buffer.reserve_exact(to_insert);
+
+    let mut inserted = 0;
+
+    const INSERT_PIXEL: RGBA = RGBA { r:255, g:0, b:0, a:255 };
+
+    for i in 0..image.buffer.len()
+    {
+        if i % image.width == 0 // at start of pixel row
+        {
+            let row = i / image.width;
+
+            if i == 0 // at first pixel row
+            {
+                // insert one row
+                let pos = i + inserted;
+                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; new_width]);
+                inserted += new_width;
+                println!("Inserted first line");
+            }
+            else if row % config.tile_size == 0 // at start of tile row
+            {
+
+                // insert one pixel
+                let pos = i + inserted;
+                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 1]);
+                inserted += 1;
+                println!("Inserted one pixel at row end");
+
+                // insert two rows
+                let pos = i + inserted;
+                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; new_width * 2]);
+                inserted += new_width * 2;
+                println!("Inserted two lines");
+            }
+            else
+            {
+                // insert one pixel
+                let pos = i + inserted;
+                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 1]);
+                inserted += 1;
+                println!("Inserted one pixel at row end");
+            }
+
+            // insert one pixel
+            let pos = i + inserted;
+            image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 1]);
+            inserted += 1;
+            println!("Inserted one pixel at row start");
+        }
+        else
+        {
+            if (i % image.width) % config.tile_size == 0 // at start of tile column
+            {
+                // insert two pixels
+                let pos = i + inserted;
+                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 2]);
+                inserted += 2;
+                println!("Inserted two pixels");
+            }
+        }
+    }
+
+    // insert one pixel
+    image.buffer.push(INSERT_PIXEL);
+    inserted += 1;
+    println!("Inserted one pixel at row end");
+
+    // insert one row
+    image.buffer.append(&mut vec![INSERT_PIXEL; new_width]);
+    inserted += new_width;
+    println!("Inserted last line");
+
+    println!("inserted {:?}, expected {:?}", inserted, to_insert);
+    assert!(inserted == to_insert);
+    assert!(image.buffer.len() % new_width == 0);
+    assert!(new_height == image.buffer.len() / new_width);
+
+    image.height = new_height;
+    image.width = new_width;
 
     //
     // Extrude tiles
     //
 
     let tile_size_with_gutters = config.tile_size + 2;
-    let tile_max_x = tile_size_with_gutters - 1;
-    let columns = image.width / tile_size_with_gutters;
-    let rows = image.height / tile_size_with_gutters;
+    let tile_pixel_max = tile_size_with_gutters - 1;
 
     println!("  Extruding {} ({}*{}) tiles into 1-pixel gutters", columns*rows, columns, rows);
 
-    for tile_row_i in 0..rows {
-        for tile_column_i in 0..columns {
-            for tile_pixel_y in 0..tile_size_with_gutters {
-
+    for tile_row_i in 0..rows
+    {
+        for tile_column_i in 0..columns
+        {
+            for tile_pixel_y in 0..tile_size_with_gutters
+            {
                 let pixel_y = tile_pixel_y + tile_row_i * tile_size_with_gutters;
 
-                for tile_pixel_x in 0..tile_size_with_gutters {
-
+                for tile_pixel_x in 0..tile_size_with_gutters
+                {
                     let pixel_x = tile_pixel_x + tile_column_i * tile_size_with_gutters;
 
-                    let from_i = if tile_pixel_y == 0 {
-
-                        Some(
-                            if tile_pixel_x == 0 {
-                                get_pixel_index(pixel_x+1, pixel_y+1, image.width)
-                            }
-                            else if tile_pixel_x == tile_max_x {
-                                get_pixel_index(pixel_x-1, pixel_y+1, image.width)
-                            }
-                            else {
-                                get_pixel_index(pixel_x, pixel_y+1, image.width)
-                            }
-                        )
-                    } else if tile_pixel_y == tile_max_x {
-
-                        Some(
-                            if tile_pixel_x == 0 {
-                                get_pixel_index(pixel_x+1, pixel_y-1, image.width)
-                            }
-                            else if tile_pixel_x == tile_max_x {
-                                get_pixel_index(pixel_x-1, pixel_y-1, image.width)
-                            }
-                            else {
-                                get_pixel_index(pixel_x, pixel_y-1, image.width)
-                            }
-                        )
-                    } else {
-
-                        if tile_pixel_x == 0 {
-                            Some(get_pixel_index(pixel_x+1, pixel_y, image.width))
+                    let from_i = match tile_pixel_y
+                    {
+                        0 => match tile_pixel_x
+                        {
+                            0 =>
+                                Some(get_pixel_index(pixel_x+1, pixel_y+1, image.width)),
+                            v if (v == tile_pixel_max) =>
+                                Some(get_pixel_index(pixel_x-1, pixel_y+1, image.width)),
+                            _ =>
+                                Some(get_pixel_index(pixel_x, pixel_y+1, image.width))
+                        },
+                        v if (v == tile_pixel_max) => match tile_pixel_x
+                        {
+                            0 =>
+                                Some(get_pixel_index(pixel_x+1, pixel_y-1, image.width)),
+                            v if (v == tile_pixel_max) =>
+                                Some(get_pixel_index(pixel_x-1, pixel_y-1, image.width)),
+                            _ =>
+                                Some(get_pixel_index(pixel_x, pixel_y-1, image.width))
+                        },
+                        _ => match tile_pixel_x
+                        {
+                            0 =>
+                                Some(get_pixel_index(pixel_x+1, pixel_y, image.width)),
+                            v if (v == tile_pixel_max) =>
+                                Some(get_pixel_index(pixel_x-1, pixel_y, image.width)),
+                            _ =>
+                                None
                         }
-                        else if tile_pixel_x == tile_size_with_gutters -1 {
-                            Some(get_pixel_index(pixel_x-1, pixel_y, image.width))
-                        }
-                        else { None }
                     };
 
                     if let Some(from_i) = from_i

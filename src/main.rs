@@ -4,6 +4,7 @@ use std::env;
 use std::error::Error;
 use std::path::PathBuf;
 use std::ffi::OsString;
+use std::default::Default;
 
 use lodepng::RGBA;
 
@@ -103,6 +104,23 @@ fn get_pixel_index(pixel_x: usize, pixel_y: usize, image_width: usize) -> usize
     pixel_y * image_width + pixel_x
 }
 
+fn insert_pixels(buf: &mut Vec<RGBA>, pos: usize, mut pixels: Vec<RGBA>) -> usize
+{
+    let count = pixels.len();
+
+    if pos >= buf.len()
+    {
+        buf.append(&mut pixels);
+    }
+    else
+    {
+        let removed = buf.splice(pos..pos, pixels);
+        assert!(removed.count() == 0);
+    }
+
+    return count;
+}
+
 fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
 {
     let input_path = &config.input_paths[path_i];
@@ -153,76 +171,39 @@ fn process_image(config: &Config, path_i: usize) -> Result<(), Box<Error>>
 
     let mut inserted = 0;
 
-    const INSERT_PIXEL: RGBA = RGBA { r:255, g:0, b:0, a:255 };
-
     for i in 0..image.buffer.len()
     {
-        if i % image.width == 0 // at start of pixel row
+        let pixel_x = i % image.width;
+
+        if pixel_x == 0 // at start of pixel row
         {
             let row = i / image.width;
 
-            if i == 0 // at first pixel row
+            if row % config.tile_size == 0 // at start of tile row
             {
-                // insert one row
-                let pos = i + inserted;
-                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; new_width]);
-                inserted += new_width;
-                println!("Inserted first line");
-            }
-            else if row % config.tile_size == 0 // at start of tile row
-            {
-
-                // insert one pixel
-                let pos = i + inserted;
-                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 1]);
-                inserted += 1;
-                println!("Inserted one pixel at row end");
-
-                // insert two rows
-                let pos = i + inserted;
-                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; new_width * 2]);
-                inserted += new_width * 2;
-                println!("Inserted two lines");
-            }
-            else
-            {
-                // insert one pixel
-                let pos = i + inserted;
-                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 1]);
-                inserted += 1;
-                println!("Inserted one pixel at row end");
+                if i == 0 // at first pixel row
+                {
+                    inserted += insert_pixels(&mut image.buffer, i+inserted, vec![Default::default(); new_width-1]);
+                }
+                else
+                {
+                    inserted += insert_pixels(&mut image.buffer, i+inserted, vec![Default::default(); new_width * 2]);
+                }
             }
 
-            // insert one pixel
-            let pos = i + inserted;
-            image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 1]);
-            inserted += 1;
-            println!("Inserted one pixel at row start");
+            inserted += insert_pixels(&mut image.buffer, i+inserted, vec![Default::default(); 2]);
         }
-        else
+        else if pixel_x % config.tile_size == 0 // at start of tile column
         {
-            if (i % image.width) % config.tile_size == 0 // at start of tile column
-            {
-                // insert two pixels
-                let pos = i + inserted;
-                image.buffer.splice(pos..pos, vec![INSERT_PIXEL; 2]);
-                inserted += 2;
-                println!("Inserted two pixels");
-            }
+            inserted += insert_pixels(&mut image.buffer, i+inserted, vec![Default::default(); 2]);
         }
     }
 
-    // insert one pixel
-    image.buffer.push(INSERT_PIXEL);
-    inserted += 1;
-    println!("Inserted one pixel at row end");
+    let pos = image.buffer.len();
+    inserted += insert_pixels(&mut image.buffer, pos, vec![Default::default(); new_width+1]);
 
-    // insert one row
-    image.buffer.append(&mut vec![INSERT_PIXEL; new_width]);
-    inserted += new_width;
-    println!("Inserted last line");
+    println!("  Resized image, inserting {} pixels", inserted);
 
-    println!("inserted {:?}, expected {:?}", inserted, to_insert);
     assert!(inserted == to_insert);
     assert!(image.buffer.len() % new_width == 0);
     assert!(new_height == image.buffer.len() / new_width);
